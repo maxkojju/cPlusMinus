@@ -583,8 +583,8 @@ int main(int argc, char** argv) {
     }
     
     std::string arg2 = argv[1];
-    if (arg2.length() >= 4 && arg2.substr(arg2.length() - 4) != ".c+-") {
-    std::cerr << "FILE MUST BE .c+-" << std::endl;
+    if (arg2.length() >= 4 && arg2.substr(arg2.length() - 4) != ".c±") {
+    std::cerr << "FILE MUST BE .c±" << std::endl;
     return 1;
     }
     

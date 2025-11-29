@@ -1,0 +1,10 @@
+func main << >> none; 
+{
+to:int = get_int_input();
+answer:int = new:int(0);
+ for(int G = new:int(0); G <= to; G+=new:int(1))
+ {
+  answer = new:int(G + answer);
+ }
+ print(answer);
+}
