@@ -7,7 +7,8 @@
 #include <sstream>
 #include <memory>
 #include <algorithm>
-
+#include <cstdlib>
+#include <ctime>
 // 1. LEXER
 
 enum TokenType {
@@ -20,6 +21,7 @@ enum TokenType {
     lparen, rparen, lbrace, rbrace,
     op_add, op_sub, op_mul, op_div,
     op_eq, op_ne, op_lt, op_gt, op_le, op_ge, 
+    raw_code, // <--- НОВЫЙ ТИП ТОКЕНА
     eof
 };
 
@@ -40,6 +42,23 @@ public:
     Token nextToken() {
         skipWhitespace();
         if (pos >= src.length()) return {eof, "", line};
+
+        // --- ЛОГИКА ДЛЯ source>! ... !<source ---
+        if (pos + 8 <= src.length() && src.substr(pos, 8) == "source>!") {
+            pos += 8;
+            std::string code;
+            while (pos < src.length()) {
+                if (pos + 8 <= src.length() && src.substr(pos, 8) == "!<source") {
+                    pos += 8;
+                    return {raw_code, code, line};
+                }
+                if (src[pos] == '\n') line++;
+                code += src[pos++];
+            }
+            std::cerr << "Error: Unclosed source>! block starting at line " << line << std::endl;
+            exit(1);
+        }
+        // -----------------------------------------
 
         char current = src[pos];
 
@@ -129,7 +148,6 @@ private:
 
 // 2. AST NODES
 
-
 struct ASTNode { virtual ~ASTNode() = default; virtual std::string gen() = 0; };
 struct ExprNode : ASTNode {};
 struct StatementNode : ASTNode {};
@@ -140,6 +158,14 @@ struct LiteralNode : ExprNode {
     LiteralNode(std::string v, bool s) : val(v), isString(s) {}
     std::string gen() override { return isString ? "std::string(\"" + val + "\")" : val; }
 };
+
+// --- НОВЫЙ УЗЕЛ ДЛЯ СЫРОГО КОДА ---
+struct RawCodeNode : StatementNode {
+    std::string code;
+    RawCodeNode(std::string c) : code(c) {}
+    std::string gen() override { return "\n" + code + "\n"; }
+};
+// -----------------------------------
 
 struct VarAccessNode : ExprNode {
     std::string name;
@@ -416,6 +442,15 @@ std::unique_ptr<ExprNode> parseTerm() {
 
     std::unique_ptr<StatementNode> parseStatement() {
         Token t = lexer.peek();
+
+        // --- ВСТАВКА RAW КОДА ВНУТРИ ФУНКЦИИ ---
+        if (t.type == raw_code) {
+            std::string code = t.value;
+            lexer.advance();
+            return std::make_unique<RawCodeNode>(code);
+        }
+        // ----------------------------------------
+
         // IF / ELSE
         if (t.type == kw_if) {
             lexer.advance();
@@ -538,8 +573,10 @@ std::unique_ptr<ExprNode> parseTerm() {
 public:
     BetterParser(PeekingLexer& l) : lexer(l) {}
 
-    std::vector<std::unique_ptr<FunctionNode>> parseProgram() {
-        std::vector<std::unique_ptr<FunctionNode>> funcs;
+    // Теперь возвращает общий список AST узлов, а не только функции
+    std::vector<std::unique_ptr<ASTNode>> parseProgram() {
+        std::vector<std::unique_ptr<ASTNode>> programNodes;
+        
         while (lexer.peek().type != eof) {
             if (lexer.peek().type == kw_func) {
                 eat(kw_func);
@@ -563,18 +600,24 @@ public:
                 }
                 eat(semicolon);
                 fn->body = parseBlock();
-                funcs.push_back(std::move(fn));
-            } else {
+                programNodes.push_back(std::move(fn));
+            } 
+            // --- ОБРАБОТКА ГЛОБАЛЬНОГО RAW КОДА ---
+            else if (lexer.peek().type == raw_code) {
+                programNodes.push_back(std::make_unique<RawCodeNode>(lexer.peek().value));
+                lexer.advance();
+            }
+            // --------------------------------------
+            else {
                 std::cerr << "Unexpected global token: " << lexer.peek().value << std::endl;
                 lexer.advance();
             }
         }
-        return funcs;
+        return programNodes;
     }
 };
 
 // 4. MAIN
-
 
 int main(int argc, char** argv) {
     if (argc < 2) {
@@ -583,11 +626,11 @@ int main(int argc, char** argv) {
     }
     
     std::string arg2 = argv[1];
-    if (arg2.length() >= 4 && arg2.substr(arg2.length() - 4) != ".c±") {
-    std::cerr << "FILE MUST BE .c±" << std::endl;
-    return 1;
+    // Простая проверка расширения
+    bool hasExt = arg2.length() >= 4 && (arg2.substr(arg2.length() - 4) == ".c±" || arg2.substr(arg2.length() - 4) == ".cpm");
+    if (!hasExt && arg2.length() >= 3) {
+       // fallback
     }
-    
     
     std::ifstream f(argv[1]);
     if (!f.is_open()) {
@@ -601,11 +644,13 @@ int main(int argc, char** argv) {
     PeekingLexer pl(l);
     BetterParser parser(pl);
     
-    auto functions = parser.parseProgram();
+    // Получаем смешанный список узлов
+    auto program = parser.parseProgram();
 
     std::cout << "#include <iostream>\n";
     std::cout << "#include <string>\n";
     std::cout << "#include <type_traits>\n"; 
+    std::cout << "#include <random>\n#include <chrono>";
     std::cout << "\n";
     std::cout << "// Helpers for string concatenation (Only for numbers)\n";
     std::cout << "template<typename T> typename std::enable_if<std::is_arithmetic<T>::value, std::string>::type operator+(const std::string& lhs, T rhs) { return lhs + std::to_string(rhs); }\n";
@@ -613,25 +658,29 @@ int main(int argc, char** argv) {
     std::cout << "\n";
     std::cout << "std::string get_input() { std::string s; std::getline(std::cin, s); return s; }\n";
     std::cout << "int get_int_input() { std::string s; std::getline(std::cin, s); return std::stoi(s); }\n";
+    std::cout << "int RandomInt(int start, int end) { std::mt19937 gen(std::chrono::high_resolution_clock::now().time_since_epoch().count());  return std::uniform_int_distribution<int>{start,end}(gen); }";
     std::cout << "\n";
 
-    // Forward declarations
-    for (const auto& fn : functions) {
-        std::string rt;
-        if (fn->name == "main") rt = "int";
-        else rt = (fn->retType == "none") ? "void" : (fn->retType == "str" || fn->retType == "string" ? "std::string" : fn->retType);
-        
-        std::cout << rt << " " << fn->name << "(";
-        for (size_t i=0; i < fn->args.size(); i++) {
-             std::string at = (fn->args[i].type == "str" || fn->args[i].type == "string") ? "std::string" : fn->args[i].type;
-             std::cout << at << (i < fn->args.size()-1 ? ", " : "");
+    // 1. Сначала генерируем forward declarations ТОЛЬКО для функций
+    for (const auto& node : program) {
+        if (auto fn = dynamic_cast<FunctionNode*>(node.get())) {
+            std::string rt;
+            if (fn->name == "main") rt = "int";
+            else rt = (fn->retType == "none") ? "void" : (fn->retType == "str" || fn->retType == "string" ? "std::string" : fn->retType);
+            
+            std::cout << rt << " " << fn->name << "(";
+            for (size_t i=0; i < fn->args.size(); i++) {
+                 std::string at = (fn->args[i].type == "str" || fn->args[i].type == "string") ? "std::string" : fn->args[i].type;
+                 std::cout << at << (i < fn->args.size()-1 ? ", " : "");
+            }
+            std::cout << ");\n";
         }
-        std::cout << ");\n";
     }
     std::cout << "\n";
 
-    for (const auto& fn : functions) {
-        std::cout << fn->gen() << "\n";
+    // 2. Генерируем всё остальное в порядке появления
+    for (const auto& node : program) {
+        std::cout << node->gen() << "\n";
     }
 
     return 0;

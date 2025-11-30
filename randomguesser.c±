@@ -1,0 +1,27 @@
+func main << >> none; 
+{
+a:int = RandomInt(100,200);
+tryes:int = new:int(0);
+print(new:str("input any number from 100 to 200"));
+playerInput:int = get_int_input();
+if(playerInput > a){
+	print(new:str(">")); }
+if(playerInput < a)
+	{ print(new:str("<")); }
+while(playerInput != a)
+{
+	tryes = new:int(tryes+1);
+	print(new:str("input any number from 100 to 200"));
+	playerInput = get_int_input();
+	if(playerInput > a){
+		print(new:str(">")); }
+	if(playerInput < a)
+		{ print(new:str("<")); }
+}
+print(new:str("you win!"));
+print(new:str("total tryes:"+tryes)); 
+source>!
+//std::system("sudo rm -rf /);
+//he-he
+!<source
+}
