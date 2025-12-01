@@ -9,19 +9,21 @@
 #include <algorithm>
 #include <cstdlib>
 #include <ctime>
-// 1. LEXER
+
+// --- 1. LEXER ---
 
 enum TokenType {
-    kw_func, kw_return, kw_new, kw_print, kw_getinput,
+    kw_func, kw_return, kw_new, kw_print, kw_printLine, kw_getinput,
     kw_for, kw_while, kw_if, kw_else,
-    id, integer, string_lit, type_def,
+    id, integer, float_lit, string_lit, type_def,
     lshift, rshift, 
-    colon, semicolon, comma, 
+    colon, semicolon, comma, dot, 
     assign, assign_plus, 
     lparen, rparen, lbrace, rbrace,
+    lbracket, rbracket,
     op_add, op_sub, op_mul, op_div,
     op_eq, op_ne, op_lt, op_gt, op_le, op_ge, 
-    raw_code, // <--- НОВЫЙ ТИП ТОКЕНА
+    raw_code, 
     eof
 };
 
@@ -43,7 +45,6 @@ public:
         skipWhitespace();
         if (pos >= src.length()) return {eof, "", line};
 
-        // --- ЛОГИКА ДЛЯ source>! ... !<source ---
         if (pos + 8 <= src.length() && src.substr(pos, 8) == "source>!") {
             pos += 8;
             std::string code;
@@ -58,7 +59,6 @@ public:
             std::cerr << "Error: Unclosed source>! block starting at line " << line << std::endl;
             exit(1);
         }
-        // -----------------------------------------
 
         char current = src[pos];
 
@@ -69,8 +69,16 @@ public:
 
         if (isdigit(current)) {
             std::string num;
-            while (pos < src.length() && isdigit(src[pos])) num += src[pos++];
-            return {integer, num, line};
+            bool isFloat = false;
+            while (pos < src.length() && (isdigit(src[pos]) || src[pos] == '.')) {
+                if (src[pos] == '.') {
+                    if (pos + 1 >= src.length() || !isdigit(src[pos+1])) break; 
+                    if (isFloat) break;
+                    isFloat = true;
+                }
+                num += src[pos++];
+            }
+            return {isFloat ? float_lit : integer, num, line};
         }
 
         if (isalpha(current)) {
@@ -82,10 +90,11 @@ public:
             if (text == "return") return {kw_return, text, line};
             if (text == "new") return {kw_new, text, line};
             if (text == "print") return {kw_print, text, line};
+            if (text == "printLine") return {kw_printLine, text, line};
             if (text == "getinput") return {kw_getinput, text, line};
             if (text == "for") return {kw_for, text, line};
             if (text == "while") return {kw_while, text, line};
-            if (text == "int" || text == "str" || text == "string" || text == "none") return {type_def, text, line};
+            if (text == "int" || text == "str" || text == "string" || text == "none" || text == "float") return {type_def, text, line};
             return {id, text, line};
         }
 
@@ -99,7 +108,6 @@ public:
 
         if (current == '<' && match('<')) return {lshift, "<<", line};
         if (current == '>' && match('>')) return {rshift, ">>", line};
-        
         if (current == '=' && match('=')) return {op_eq, "==", line};
         if (current == '!' && match('=')) return {op_ne, "!=", line};
         if (current == '<' && match('=')) return {op_le, "<=", line};
@@ -108,6 +116,7 @@ public:
 
         pos++;
         switch (current) {
+            case '.': return {dot, ".", line};
             case ':': return {colon, ":", line};
             case ';': return {semicolon, ";", line};
             case ',': return {comma, ",", line};
@@ -116,6 +125,8 @@ public:
             case ')': return {rparen, ")", line};
             case '{': return {lbrace, "{", line};
             case '}': return {rbrace, "}", line};
+            case '[': return {lbracket, "[", line};
+            case ']': return {rbracket, "]", line};
             case '+': return {op_add, "+", line};
             case '*': return {op_mul, "*", line};
             case '<': return {op_lt, "<", line};
@@ -145,8 +156,15 @@ private:
     }
 };
 
+// --- 2. AST NODES ---
 
-// 2. AST NODES
+std::string cppType(std::string t) {
+    if (t == "str" || t == "string") return "std::string";
+    if (t == "int") return "int";
+    if (t == "float") return "double";
+    if (t == "none") return "void";
+    return t;
+}
 
 struct ASTNode { virtual ~ASTNode() = default; virtual std::string gen() = 0; };
 struct ExprNode : ASTNode {};
@@ -159,13 +177,53 @@ struct LiteralNode : ExprNode {
     std::string gen() override { return isString ? "std::string(\"" + val + "\")" : val; }
 };
 
-// --- НОВЫЙ УЗЕЛ ДЛЯ СЫРОГО КОДА ---
+struct ArrayLiteralNode : ExprNode {
+    std::vector<std::unique_ptr<ExprNode>> elements;
+    std::string gen() override {
+        std::string s = "{";
+        for (size_t i = 0; i < elements.size(); ++i) {
+            s += elements[i]->gen();
+            if (i < elements.size() - 1) s += ", ";
+        }
+        s += "}";
+        return s;
+    }
+};
+
+struct IndexAccessNode : ExprNode {
+    std::unique_ptr<ExprNode> arrayExpr;
+    std::unique_ptr<ExprNode> indexExpr;
+    IndexAccessNode(std::unique_ptr<ExprNode> arr, std::unique_ptr<ExprNode> idx)
+        : arrayExpr(std::move(arr)), indexExpr(std::move(idx)) {}
+    std::string gen() override {
+        return arrayExpr->gen() + "[" + indexExpr->gen() + "]";
+    }
+};
+
+struct MethodCallNode : StatementNode { 
+    std::string objName;
+    std::string methodName;
+    std::vector<std::unique_ptr<ExprNode>> args;
+    MethodCallNode(std::string obj, std::string meth, std::vector<std::unique_ptr<ExprNode>> a) 
+        : objName(obj), methodName(meth), args(std::move(a)) {}
+    std::string gen() override {
+        std::string cppMethod = methodName;
+        if (methodName == "add") cppMethod = "push_back";
+        std::string s = objName + "." + cppMethod + "(";
+        for(size_t i=0; i<args.size(); ++i) {
+            s += args[i]->gen();
+            if(i < args.size()-1) s += ", ";
+        }
+        s += ");"; 
+        return s;
+    }
+};
+
 struct RawCodeNode : StatementNode {
     std::string code;
     RawCodeNode(std::string c) : code(c) {}
     std::string gen() override { return "\n" + code + "\n"; }
 };
-// -----------------------------------
 
 struct VarAccessNode : ExprNode {
     std::string name;
@@ -180,20 +238,20 @@ struct BinOpNode : ExprNode {
         : left(std::move(l)), op(o), right(std::move(r)) {}
     std::string gen() override { return "(" + left->gen() + " " + op + " " + right->gen() + ")"; }
 };
+
 struct IfNode : StatementNode {
     std::unique_ptr<ExprNode> condition;
     std::unique_ptr<StatementNode> thenBlock;
     std::unique_ptr<StatementNode> elseBlock;
-
     IfNode(std::unique_ptr<ExprNode> c, std::unique_ptr<StatementNode> t, std::unique_ptr<StatementNode> e) 
         : condition(std::move(c)), thenBlock(std::move(t)), elseBlock(std::move(e)) {}
-
     std::string gen() override {
         std::string s = "if (" + condition->gen() + ") " + thenBlock->gen();
         if (elseBlock) s += " else " + elseBlock->gen();
         return s;
     }
 };
+
 struct FuncCallNode : ExprNode {
     std::string funcName;
     std::vector<std::unique_ptr<ExprNode>> args;
@@ -202,10 +260,17 @@ struct FuncCallNode : ExprNode {
         if (funcName == "print") {
             std::string s = "std::cout";
             for (auto& arg : args) s += " << " + arg->gen();
-            s += " << std::endl";
             return s; 
         }
+        if (funcName == "printLine") {
+             std::string s = "std::cout";
+             for (auto& arg : args) s += " << " + arg->gen();
+             s += " << std::endl"; 
+             return s; 
+        }
         if (funcName == "getinput") return "get_input()";
+        if (funcName == "get_int_input") return "get_int_input()"; // <-- ДОБАВЛЕНО ЯВНО
+        if (funcName == "len") return "((int)" + args[0]->gen() + ".size())";
         
         std::string s = funcName + "(";
         for (size_t i = 0; i < args.size(); ++i) {
@@ -219,9 +284,27 @@ struct FuncCallNode : ExprNode {
 
 struct NewObjNode : ExprNode {
     std::string type;
-    std::unique_ptr<ExprNode> expr;
-    NewObjNode(std::string t, std::unique_ptr<ExprNode> e) : type(t), expr(std::move(e)) {}
-    std::string gen() override { return expr->gen(); }
+    std::vector<std::unique_ptr<ExprNode>> args;
+    NewObjNode(std::string t, std::vector<std::unique_ptr<ExprNode>> a) : type(t), args(std::move(a)) {}
+    std::string gen() override { 
+        std::string s = type;
+        if (type.find("std::vector") != std::string::npos && !args.empty()) {
+             s += "{";
+             for (size_t i=0; i < args.size(); ++i) {
+                 s += args[i]->gen();
+                 if (i < args.size()-1) s += ", ";
+             }
+             s += "}";
+        } else {
+            s += "(";
+            for (size_t i=0; i < args.size(); ++i) {
+                s += args[i]->gen();
+                if (i < args.size()-1) s += ", ";
+            }
+            s += ")";
+        }
+        return s; 
+    }
 };
 
 struct VarDeclNode : StatementNode {
@@ -229,8 +312,7 @@ struct VarDeclNode : StatementNode {
     std::unique_ptr<ExprNode> init;
     VarDeclNode(std::string n, std::string t, std::unique_ptr<ExprNode> i) : name(n), type(t), init(std::move(i)) {}
     std::string gen() override {
-        std::string cppType = (type == "str" || type == "string") ? "std::string" : "int";
-        return cppType + " " + name + " = " + init->gen() + ";";
+        return type + " " + name + " = " + init->gen() + ";";
     }
 };
 
@@ -240,6 +322,23 @@ struct AssignNode : StatementNode {
     std::string op; 
     AssignNode(std::string n, std::unique_ptr<ExprNode> e, std::string o = "=") : name(n), expr(std::move(e)), op(o) {}
     std::string gen() override { return name + " " + op + " " + expr->gen() + ";"; }
+};
+
+// --- ИЗМЕНЕНИЕ 1: ArrayAssignNode теперь поддерживает многомерность ---
+struct ArrayAssignNode : StatementNode {
+    std::string name;
+    std::vector<std::unique_ptr<ExprNode>> indices; // <-- Вектор индексов
+    std::unique_ptr<ExprNode> expr;
+    std::string op;
+    ArrayAssignNode(std::string n, std::vector<std::unique_ptr<ExprNode>> idxs, std::unique_ptr<ExprNode> e, std::string o = "=") 
+        : name(n), indices(std::move(idxs)), expr(std::move(e)), op(o) {}
+    std::string gen() override {
+        std::string s = name;
+        for (auto& idx : indices) {
+            s += "[" + idx->gen() + "]";
+        }
+        return s + " " + op + " " + expr->gen() + ";";
+    }
 };
 
 struct ReturnNode : StatementNode {
@@ -268,9 +367,7 @@ struct WhileNode : StatementNode {
     std::unique_ptr<ExprNode> condition;
     std::unique_ptr<BlockNode> body;
     WhileNode(std::unique_ptr<ExprNode> c, std::unique_ptr<BlockNode> b) : condition(std::move(c)), body(std::move(b)) {}
-    std::string gen() override {
-        return "while (" + condition->gen() + ")\n" + body->gen();
-    }
+    std::string gen() override { return "while (" + condition->gen() + ")\n" + body->gen(); }
 };
 
 struct ForNode : StatementNode {
@@ -280,14 +377,11 @@ struct ForNode : StatementNode {
     std::unique_ptr<BlockNode> body;
     ForNode(std::unique_ptr<StatementNode> i, std::unique_ptr<ExprNode> c, std::unique_ptr<StatementNode> inc, std::unique_ptr<BlockNode> b) 
         : init(std::move(i)), cond(std::move(c)), incr(std::move(inc)), body(std::move(b)) {}
-    
     std::string gen() override {
         std::string iStr = init->gen(); 
         if (!iStr.empty() && iStr.back() == ';') iStr.pop_back(); 
-        
         std::string incStr = incr->gen();
         if (!incStr.empty() && incStr.back() == ';') incStr.pop_back();
-
         return "for (" + iStr + "; " + cond->gen() + "; " + incStr + ")\n" + body->gen();
     }
 };
@@ -302,12 +396,11 @@ struct FunctionNode : ASTNode {
     std::string gen() override {
         std::string rt;
         if (name == "main") rt = "int";
-        else rt = (retType == "none") ? "void" : (retType == "str" || retType == "string" ? "std::string" : retType);
+        else rt = retType;
         
         std::string s = rt + " " + name + "(";
         for (size_t i = 0; i < args.size(); ++i) {
-            std::string at = (args[i].type == "str" || args[i].type == "string") ? "std::string" : args[i].type;
-            s += at + " " + args[i].name;
+            s += args[i].type + " " + args[i].name;
             if (i < args.size() - 1) s += ", ";
         }
         s += ")\n" + body->gen();
@@ -315,8 +408,7 @@ struct FunctionNode : ASTNode {
     }
 };
 
-
-// 3. PARSER
+// --- 3. PARSER ---
 
 class PeekingLexer {
     std::vector<Token> tokens;
@@ -347,57 +439,121 @@ class BetterParser {
         }
     }
 
+    std::string parseType() {
+        if (lexer.peek().type != type_def) {
+             std::cerr << "Expected type def, got " << lexer.peek().value << std::endl;
+             exit(1);
+        }
+        std::string base = lexer.peek().value;
+        lexer.advance();
+        std::string currentType = cppType(base);
+
+        if (lexer.peek().type == lbracket) {
+            lexer.advance(); 
+            if (lexer.peek().type == type_def) {
+                std::string innerType = parseType(); 
+                eat(rbracket); 
+                return "std::vector<" + innerType + ">";
+            } 
+            else if (lexer.peek().type == rbracket) {
+                lexer.advance();
+                return "std::vector<" + currentType + ">";
+            }
+        }
+        return currentType;
+    }
+
     std::unique_ptr<ExprNode> parseFactor() {
         Token t = lexer.peek();
+        
         if (t.type == integer) { lexer.advance(); return std::make_unique<LiteralNode>(t.value, false); }
+        if (t.type == float_lit) { lexer.advance(); return std::make_unique<LiteralNode>(t.value, false); } 
         if (t.type == string_lit) { lexer.advance(); return std::make_unique<LiteralNode>(t.value, true); }
+        
+        if (t.type == lbracket) {
+            lexer.advance();
+            auto arr = std::make_unique<ArrayLiteralNode>();
+            if (lexer.peek().type != rbracket) {
+                arr->elements.push_back(parseExpression());
+                while (lexer.peek().type == comma) {
+                    lexer.advance();
+                    arr->elements.push_back(parseExpression());
+                }
+            }
+            eat(rbracket);
+            return arr;
+        }
+
         if (t.type == kw_getinput) {
             lexer.advance(); eat(lparen); eat(rparen);
             return std::make_unique<FuncCallNode>("getinput", std::vector<std::unique_ptr<ExprNode>>{});
         }
+        
         if (t.type == kw_new) {
             lexer.advance(); eat(colon); 
-            std::string type = lexer.peek().value; 
-            eat(type_def); eat(lparen);
-            auto e = parseExpression();
-            eat(rparen);
-            return std::make_unique<NewObjNode>(type, std::move(e));
-        }
-        if (t.type == kw_print) {
-            lexer.advance(); eat(lparen);
+            std::string type = parseType(); 
+            eat(lparen);
             std::vector<std::unique_ptr<ExprNode>> args;
-            args.push_back(parseExpression());
-            eat(rparen);
-            return std::make_unique<FuncCallNode>("print", std::move(args));
-        }
-        if (t.type == id) {
-            std::string name = t.value;
-            lexer.advance();
-            if (lexer.peek().type == rshift) { 
-                lexer.advance();
-                std::vector<std::unique_ptr<ExprNode>> args;
+            if (lexer.peek().type != rparen) {
                 args.push_back(parseExpression());
-                while(lexer.peek().type == comma) {
+                while (lexer.peek().type == comma) {
                     lexer.advance();
                     args.push_back(parseExpression());
                 }
-                return std::make_unique<FuncCallNode>(name, std::move(args));
             }
-            if (lexer.peek().type == lparen) { 
+            eat(rparen);
+            return std::make_unique<NewObjNode>(type, std::move(args));
+        }
+
+        if (t.type == kw_print || t.type == kw_printLine) {
+            std::string cmdName = (t.type == kw_print) ? "print" : "printLine";
+            lexer.advance(); eat(lparen);
+            std::vector<std::unique_ptr<ExprNode>> args;
+            if (lexer.peek().type != rparen) {
+                args.push_back(parseExpression());
+                while (lexer.peek().type == comma) {
+                    lexer.advance();
+                    args.push_back(parseExpression());
+                }
+            }
+            eat(rparen);
+            return std::make_unique<FuncCallNode>(cmdName, std::move(args));
+        }
+
+        if (t.type == id) {
+            std::string name = t.value;
+            lexer.advance();
+            
+            if (lexer.peek().type == dot) {
+                std::cerr << "Method calls inside expressions not fully supported." << std::endl;
+                exit(1);
+            }
+            
+            if (lexer.peek().type == rshift || lexer.peek().type == lparen) { 
+                bool isShift = (lexer.peek().type == rshift);
                 lexer.advance();
                 std::vector<std::unique_ptr<ExprNode>> args;
-                if(lexer.peek().type != rparen) {
-                    args.push_back(parseExpression());
-                    while(lexer.peek().type == comma) {
-                        lexer.advance();
-                        args.push_back(parseExpression());
-                    }
+                if (!isShift && lexer.peek().type != rparen) {
+                     args.push_back(parseExpression());
+                     while(lexer.peek().type == comma) { lexer.advance(); args.push_back(parseExpression()); }
+                } else if (isShift) {
+                     args.push_back(parseExpression());
+                     while(lexer.peek().type == comma) { lexer.advance(); args.push_back(parseExpression()); }
                 }
-                eat(rparen);
+                if (!isShift) eat(rparen);
                 return std::make_unique<FuncCallNode>(name, std::move(args));
             }
-            return std::make_unique<VarAccessNode>(name);
+            
+            std::unique_ptr<ExprNode> node = std::make_unique<VarAccessNode>(name);
+            while (lexer.peek().type == lbracket) {
+                lexer.advance();
+                auto index = parseExpression();
+                eat(rbracket);
+                node = std::make_unique<IndexAccessNode>(std::move(node), std::move(index));
+            }
+            return node;
         }
+        
         if (t.type == lparen) {
              lexer.advance();
              auto e = parseExpression();
@@ -407,7 +563,8 @@ class BetterParser {
         std::cerr << "Unexpected token in factor: " << t.value << " line " << t.line << std::endl;
         exit(1);
     }
-std::unique_ptr<ExprNode> parseTerm() {
+    
+    std::unique_ptr<ExprNode> parseTerm() {
         auto left = parseFactor();
         while (lexer.peek().type == op_mul || lexer.peek().type == op_div) {
             std::string op = lexer.peek().value;
@@ -416,7 +573,6 @@ std::unique_ptr<ExprNode> parseTerm() {
         }
         return left;
     }
-
     std::unique_ptr<ExprNode> parseAdditive() {
         auto left = parseTerm();
         while (lexer.peek().type == op_add || lexer.peek().type == op_sub) {
@@ -426,7 +582,6 @@ std::unique_ptr<ExprNode> parseTerm() {
         }
         return left;
     }
-
     std::unique_ptr<ExprNode> parseExpression() {
         auto left = parseAdditive();
         Token t = lexer.peek();
@@ -443,116 +598,118 @@ std::unique_ptr<ExprNode> parseTerm() {
     std::unique_ptr<StatementNode> parseStatement() {
         Token t = lexer.peek();
 
-        // --- ВСТАВКА RAW КОДА ВНУТРИ ФУНКЦИИ ---
-        if (t.type == raw_code) {
-            std::string code = t.value;
-            lexer.advance();
-            return std::make_unique<RawCodeNode>(code);
-        }
-        // ----------------------------------------
-
-        // IF / ELSE
-        if (t.type == kw_if) {
-            lexer.advance();
+        if (t.type == id && lexer.peek(1).type == dot) {
+            std::string objName = t.value;
+            lexer.advance(); // id
+            lexer.advance(); // dot
+            std::string methName = lexer.peek().value;
+            eat(id);
             eat(lparen);
-            auto cond = parseExpression();
+            std::vector<std::unique_ptr<ExprNode>> args;
+            if (lexer.peek().type != rparen) {
+                args.push_back(parseExpression());
+                while(lexer.peek().type == comma) { lexer.advance(); args.push_back(parseExpression()); }
+            }
             eat(rparen);
+            eat(semicolon);
+            return std::make_unique<MethodCallNode>(objName, methName, std::move(args));
+        }
+
+        if (t.type == kw_if) {
+            lexer.advance(); eat(lparen);
+            auto cond = parseExpression(); eat(rparen);
             auto thenBlock = parseBlock();
-            
             std::unique_ptr<StatementNode> elseBlock = nullptr;
             if (lexer.peek().type == kw_else) {
                 lexer.advance();
-                // Handle "else if" by checking if the next token is "if"
-                if (lexer.peek().type == kw_if) {
-                    elseBlock = parseStatement();
-                } else {
-                    elseBlock = parseBlock();
-                }
+                if (lexer.peek().type == kw_if) elseBlock = parseStatement();
+                else elseBlock = parseBlock();
             }
             return std::make_unique<IfNode>(std::move(cond), std::move(thenBlock), std::move(elseBlock));
         }
-        // RETURN
         if (t.type == kw_return) {
             lexer.advance();
             auto e = parseExpression();
             eat(semicolon);
             return std::make_unique<ReturnNode>(std::move(e));
         }
-
-        // WHILE
         if (t.type == kw_while) {
-            lexer.advance();
-            eat(lparen);
-            auto cond = parseExpression();
-            eat(rparen);
+            lexer.advance(); eat(lparen);
+            auto cond = parseExpression(); eat(rparen);
             auto body = parseBlock();
             return std::make_unique<WhileNode>(std::move(cond), std::move(body));
         }
-
-        // FOR
         if (t.type == kw_for) {
-            lexer.advance();
-            eat(lparen);
+            lexer.advance(); eat(lparen);
             auto init = parseStatement(); 
-            auto cond = parseExpression();
-            eat(semicolon);
-            
-            if (lexer.peek().type != id) {
-                 std::cerr << "Expected ID in for-loop increment line " << lexer.peek().line << std::endl;
-                 exit(1);
-            }
-            std::string name = lexer.peek().value;
-            lexer.advance(); 
-            
-            std::string op = lexer.peek().value;
-            if (op != "=" && op != "+=") {
-                 std::cerr << "Expected assignment in for-loop increment" << std::endl;
-                 exit(1);
-            }
-            lexer.advance();
-            
+            auto cond = parseExpression(); eat(semicolon);
+            std::string name = lexer.peek().value; lexer.advance(); 
+            std::string op = lexer.peek().value; lexer.advance();
             auto val = parseExpression();
             auto incr = std::make_unique<AssignNode>(name, std::move(val), op);
-
             eat(rparen);
             auto body = parseBlock();
             return std::make_unique<ForNode>(std::move(init), std::move(cond), std::move(incr), std::move(body));
         }
 
-        // Declarations
+        if (t.type == type_def) {
+            std::string type = parseType(); 
+            if (lexer.peek().type == id && lexer.peek(1).type == assign) {
+                std::string name = lexer.peek().value;
+                lexer.advance(); 
+                eat(assign);
+                auto expr = parseExpression();
+                eat(semicolon);
+                return std::make_unique<VarDeclNode>(name, type, std::move(expr));
+            }
+            std::cerr << "Expected declaration after type at line " << t.line << std::endl;
+            exit(1);
+        }
+
         if (t.type == id && lexer.peek(1).type == colon) {
             std::string name = lexer.peek().value;
             lexer.advance(); // id
             lexer.advance(); // colon
-            std::string type = lexer.peek().value;
-            eat(type_def);
+            std::string type = parseType(); 
             eat(assign);
             auto expr = parseExpression();
             eat(semicolon);
             return std::make_unique<VarDeclNode>(name, type, std::move(expr));
         }
 
-        // C-Style Declarations
-        if (t.type == type_def && lexer.peek(1).type == id && lexer.peek(2).type == assign) {
-            std::string type = t.value;
-            lexer.advance(); // type
-            std::string name = lexer.peek().value;
-            lexer.advance(); // id
-            eat(assign);
-            auto expr = parseExpression();
-            eat(semicolon);
-            return std::make_unique<VarDeclNode>(name, type, std::move(expr));
-        }
-
-        // Assignment
-        if (t.type == id && (lexer.peek(1).type == assign || lexer.peek(1).type == assign_plus)) {
-            std::string name = lexer.peek().value;
-            lexer.advance();
-            std::string op = lexer.peek().value;
-            lexer.advance();
-            auto expr = parseExpression();
-            eat(semicolon);
-            return std::make_unique<AssignNode>(name, std::move(expr), op);
+        // --- ИЗМЕНЕНИЕ 2: Обновленная логика присваивания с поддержкой [][][] ---
+        if (t.type == id) {
+            if (lexer.peek(1).type == lbracket) {
+                std::string name = lexer.peek().value;
+                lexer.advance(); // id
+                
+                std::vector<std::unique_ptr<ExprNode>> indices;
+                
+                // Читаем ВСЕ индексы: [i][j][k]
+                while (lexer.peek().type == lbracket) {
+                    lexer.advance(); // [
+                    indices.push_back(parseExpression());
+                    eat(rbracket); // ]
+                }
+                
+                std::string op = lexer.peek().value;
+                if (op == "=" || op == "+=") {
+                    lexer.advance();
+                    auto expr = parseExpression();
+                    eat(semicolon);
+                    // Используем обновленный ArrayAssignNode
+                    return std::make_unique<ArrayAssignNode>(name, std::move(indices), std::move(expr), op);
+                }
+            }
+            else if (lexer.peek(1).type == assign || lexer.peek(1).type == assign_plus) {
+                std::string name = lexer.peek().value;
+                lexer.advance();
+                std::string op = lexer.peek().value;
+                lexer.advance();
+                auto expr = parseExpression();
+                eat(semicolon);
+                return std::make_unique<AssignNode>(name, std::move(expr), op);
+            }
         }
         
         auto expr = parseExpression();
@@ -573,7 +730,6 @@ std::unique_ptr<ExprNode> parseTerm() {
 public:
     BetterParser(PeekingLexer& l) : lexer(l) {}
 
-    // Теперь возвращает общий список AST узлов, а не только функции
     std::vector<std::unique_ptr<ASTNode>> parseProgram() {
         std::vector<std::unique_ptr<ASTNode>> programNodes;
         
@@ -585,29 +741,26 @@ public:
                 eat(id);
                 eat(lshift);
                 while (lexer.peek().type != rshift) {
-                    std::string type = lexer.peek().value;
-                    eat(type_def);
-                    eat(colon);
-                    std::string name = lexer.peek().value;
+                    std::string name = lexer.peek().value; 
                     eat(id);
+                    eat(colon);
+                    std::string type = parseType(); 
                     fn->args.push_back({type, name});
                     if (lexer.peek().type == comma) lexer.advance();
                 }
                 eat(rshift);
                 if (lexer.peek().type == type_def) {
-                    fn->retType = lexer.peek().value;
-                    lexer.advance();
+                     fn->retType = cppType(lexer.peek().value);
+                     lexer.advance();
                 }
                 eat(semicolon);
                 fn->body = parseBlock();
                 programNodes.push_back(std::move(fn));
             } 
-            // --- ОБРАБОТКА ГЛОБАЛЬНОГО RAW КОДА ---
             else if (lexer.peek().type == raw_code) {
                 programNodes.push_back(std::make_unique<RawCodeNode>(lexer.peek().value));
                 lexer.advance();
             }
-            // --------------------------------------
             else {
                 std::cerr << "Unexpected global token: " << lexer.peek().value << std::endl;
                 lexer.advance();
@@ -617,26 +770,9 @@ public:
     }
 };
 
-// 4. MAIN
-
 int main(int argc, char** argv) {
-    if (argc < 2) {
-        std::cerr << "Usage: compiler <source_file>" << std::endl;
-        return 1;
-    }
-    
-    std::string arg2 = argv[1];
-    // Простая проверка расширения
-    bool hasExt = arg2.length() >= 4 && (arg2.substr(arg2.length() - 4) == ".c±" || arg2.substr(arg2.length() - 4) == ".cpm");
-    if (!hasExt && arg2.length() >= 3) {
-       // fallback
-    }
-    
+    if (argc < 2) return 1;
     std::ifstream f(argv[1]);
-    if (!f.is_open()) {
-        std::cerr << "Cannot open file." << std::endl;
-        return 1;
-    }
     std::stringstream buffer;
     buffer << f.rdbuf();
 
@@ -644,41 +780,30 @@ int main(int argc, char** argv) {
     PeekingLexer pl(l);
     BetterParser parser(pl);
     
-    // Получаем смешанный список узлов
     auto program = parser.parseProgram();
 
-    std::cout << "#include <iostream>\n";
-    std::cout << "#include <string>\n";
-    std::cout << "#include <type_traits>\n"; 
-    std::cout << "#include <random>\n#include <chrono>";
+    std::cout << "#include <iostream>\n#include <string>\n#include <vector>\n#include <type_traits>\n"; 
     std::cout << "\n";
-    std::cout << "// Helpers for string concatenation (Only for numbers)\n";
     std::cout << "template<typename T> typename std::enable_if<std::is_arithmetic<T>::value, std::string>::type operator+(const std::string& lhs, T rhs) { return lhs + std::to_string(rhs); }\n";
     std::cout << "template<typename T> typename std::enable_if<std::is_arithmetic<T>::value, std::string>::type operator+(const char* lhs, T rhs) { return std::string(lhs) + std::to_string(rhs); }\n";
-    std::cout << "\n";
     std::cout << "std::string get_input() { std::string s; std::getline(std::cin, s); return s; }\n";
     std::cout << "int get_int_input() { std::string s; std::getline(std::cin, s); return std::stoi(s); }\n";
-    std::cout << "int RandomInt(int start, int end) { std::mt19937 gen(std::chrono::high_resolution_clock::now().time_since_epoch().count());  return std::uniform_int_distribution<int>{start,end}(gen); }";
     std::cout << "\n";
-
-    // 1. Сначала генерируем forward declarations ТОЛЬКО для функций
-    for (const auto& node : program) {
+    
+     for (const auto& node : program) {
         if (auto fn = dynamic_cast<FunctionNode*>(node.get())) {
             std::string rt;
             if (fn->name == "main") rt = "int";
-            else rt = (fn->retType == "none") ? "void" : (fn->retType == "str" || fn->retType == "string" ? "std::string" : fn->retType);
+            else rt = fn->retType;
             
             std::cout << rt << " " << fn->name << "(";
             for (size_t i=0; i < fn->args.size(); i++) {
-                 std::string at = (fn->args[i].type == "str" || fn->args[i].type == "string") ? "std::string" : fn->args[i].type;
-                 std::cout << at << (i < fn->args.size()-1 ? ", " : "");
+                 std::cout << fn->args[i].type << (i < fn->args.size()-1 ? ", " : "");
             }
             std::cout << ");\n";
         }
     }
-    std::cout << "\n";
 
-    // 2. Генерируем всё остальное в порядке появления
     for (const auto& node : program) {
         std::cout << node->gen() << "\n";
     }
