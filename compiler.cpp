@@ -788,6 +788,7 @@ int main(int argc, char** argv) {
     std::cout << "template<typename T> typename std::enable_if<std::is_arithmetic<T>::value, std::string>::type operator+(const char* lhs, T rhs) { return std::string(lhs) + std::to_string(rhs); }\n";
     std::cout << "std::string get_input() { std::string s; std::getline(std::cin, s); return s; }\n";
     std::cout << "int get_int_input() { std::string s; std::getline(std::cin, s); return std::stoi(s); }\n";
+    std::cout << "int RandomInt(int start, int end) { std::mt19937 gen(std::chrono::high_resolution_clock::now().time_since_epoch().count());  return std::uniform_int_distribution<int>{start,end}(gen); }";
     std::cout << "\n";
     
      for (const auto& node : program) {
